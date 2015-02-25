@@ -1,0 +1,14 @@
+{application, ramp, [
+    {description, "Random Access MultiPartition transactions"},
+    {vsn, "0.0.1"},
+    {modules, []},
+    {registered, []},
+    {applications, [
+                    kernel,
+                    stdlib,
+                    sasl,
+                    mnesia
+                   ]},
+    {mod, {ramp_app, []}},
+    {env, []}
+]}.

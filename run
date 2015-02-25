@@ -1,0 +1,4 @@
+#!/bin/bash
+# Just run it for tests
+
+erl -pa ebin -run ramp start -sname ramp
