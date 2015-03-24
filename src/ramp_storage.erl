@@ -11,8 +11,12 @@
         ]).
 
 -record(state, {}).
--record(kv, {ts, item, value, md}).
 -record(latest, {item, ts}).
+
+-include("include/ramp.hrl").
+
+-type ramp_kv() :: #ramp_kv{}.
+-export_type([ramp_kv/0]).
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
@@ -21,10 +25,11 @@
 %%%===================================================================
 %%% API
 %%%===================================================================
+-spec start_link() -> {ok,pid()} | ignore | {error,term()}.
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
--spec prepare(#kv{}) -> {ok, term()}.
+-spec prepare(ramp_kv()) -> ok.
 prepare(Item) ->
     gen_server:call(?MODULE, {prepare, Item}).
 
@@ -32,7 +37,7 @@ prepare(Item) ->
 commit(Ts) ->
     gen_server:call(?MODULE, {commit, Ts}).
 
--spec get(term()) -> {ok, term()} | not_found | multiple_items_call_doctor.
+-spec get(term()) -> {ok, ramp_kv()} | not_found | multiple_items_call_doctor.
 get(Key) ->
     gen_server:call(?MODULE, {get, Key}).
 
@@ -45,17 +50,16 @@ get(Key, Timestamp) ->
 init([]) ->
     {ok, #state{}, 0}.
 
-handle_call({prepare, #kv{ts = Ts} = Item}, From, State) ->
-    InnerTs = {Ts, From},
+handle_call({prepare, Item}, _From, State) ->
     mnesia:transaction(fun () ->
-        mnesia:write(vals, Item#kv{ts = InnerTs}, write)
+        mnesia:write(vals, Item, write)
     end),
-    {reply, {ok, InnerTs}, State};
+    {reply, ok, State};
 
 handle_call({commit, Ts}, _From, State) ->
     {atomic, ok} = mnesia:transaction(fun () ->
         Items = mnesia:read(vals, Ts),
-        lists:foreach(fun (#kv{item = I, ts = T}) ->
+        lists:foreach(fun (#ramp_kv{item = I, ts = T}) ->
                 case mnesia:read(latest, I) of
                     [] ->
                         mnesia:write(latest, #latest{item = I, ts = T}, write);
@@ -89,8 +93,8 @@ handle_call({get, Key, Ts}, _From, State) ->
             end) of
         {atomic, not_found} -> {reply, not_found, State};
         {atomic, Items} ->
-            case [I || I <- Items, I#kv.item =:= Key] of
-                [#kv{value = V}] ->
+            case [I || I <- Items, I#ramp_kv.item =:= Key] of
+                [#ramp_kv{} = V] ->
                     {reply, {ok, V}, State};
                 [] ->
                     {reply, not_found, State};
@@ -104,8 +108,9 @@ handle_cast(_Request, State) ->
 
 handle_info(timeout, State) ->
     {atomic, ok} = mnesia:create_table(vals,
-                                       [{attributes, record_info(fields, kv)},
-                                        {record_name, kv},
+                                       [{attributes, record_info(fields, ramp_kv)},
+                                        {type, bag},
+                                        {record_name, ramp_kv},
                                         {ram_copies, [node()]}]),
     {atomic, ok} = mnesia:create_table(latest,
                                        [{attributes, record_info(fields, latest)},
@@ -129,15 +134,15 @@ prepare_test_() ->
      fun() ->
         meck:new(mnesia, [unstick]),
         meck:expect(mnesia, transaction, fun (Fun) -> {atomic, Fun()} end),
-        meck:expect(mnesia, write, fun(vals, #kv{}, write) -> ok end)
+        meck:expect(mnesia, write, fun(vals, #ramp_kv{}, write) -> ok end)
      end,
      fun(_) ->
         meck:unload(mnesia)
      end,
      [
-      ?_assertMatch({reply, {ok, {{1, 1, 1}, from}}, {}},
+      ?_assertMatch({reply, ok, {}},
                     handle_call({prepare,
-                                 #kv{ts={1,1,1}, item=key1, value=value1, md=[]}},
+                                 #ramp_kv{ts={{1,1,1},from}, item=key1, value=value1, md=[]}},
                                 from, {})),
       ?_assertError(function_clause,
                     handle_call({prepare, value1}, from, {}))
@@ -150,9 +155,9 @@ commit_test_() ->
         meck:expect(mnesia, transaction, fun (Fun) -> {atomic, Fun()} end),
         meck:expect(mnesia, read,
                     fun(vals, {{1,1,1}, from}) -> [];
-                       (vals, {{1,1,2}, from}) -> [#kv{ts={{1,1,2},from}, item=key1, value=value1, md=[]}];
-                       (vals, {{1,1,3}, from}) -> [#kv{ts={{1,1,3},from}, item=key2, value=value2, md=[]}];
-                       (vals, {{6,6,6}, from}) -> [#kv{ts={{6,6,6},from}, item=key3, value=value3, md=[]}];
+                       (vals, {{1,1,2}, from}) -> [#ramp_kv{ts={{1,1,2},from}, item=key1, value=value1, md=[]}];
+                       (vals, {{1,1,3}, from}) -> [#ramp_kv{ts={{1,1,3},from}, item=key2, value=value2, md=[]}];
+                       (vals, {{6,6,6}, from}) -> [#ramp_kv{ts={{6,6,6},from}, item=key3, value=value3, md=[]}];
                        (latest, key1) -> [];
                        (latest, key2) -> [#latest{ts={{1,1,3}, from}, item=key2}];
                        (latest, key3) -> [#latest{ts={{0,0,0}, from}, item=key2}]
@@ -183,12 +188,12 @@ get_test_() ->
         meck:expect(mnesia, read,
                     fun(latest, key1) -> [];
                        (latest, key2) -> [#latest{ts={{1,1,1},from}}];
-                       (vals, {{1,1,1},from}) -> [#kv{ts={{1,1,1},from}, item=key2, value=value2, md=[]}];
+                       (vals, {{1,1,1},from}) -> [#ramp_kv{ts={{1,1,1},from}, item=key2, value=value2, md=[]}];
                        (vals, {{1,1,2},from}) -> [];
-                       (vals, {{1,1,3},from}) -> [#kv{ts={{1,1,3},from}, item=other, value=value666, md=[]},
-                                                  #kv{ts={{1,1,3},from}, item=key4, value=value4, md=[]}];
-                       (vals, {{1,1,4},from}) -> [#kv{ts={{1,1,4},from}, item=key5, value=value6, md=[]},
-                                                  #kv{ts={{1,1,4},from}, item=key5, value=value5, md=[]}]
+                       (vals, {{1,1,3},from}) -> [#ramp_kv{ts={{1,1,3},from}, item=other, value=value666, md=[]},
+                                                  #ramp_kv{ts={{1,1,3},from}, item=key4, value=value4, md=[]}];
+                       (vals, {{1,1,4},from}) -> [#ramp_kv{ts={{1,1,4},from}, item=key5, value=value6, md=[]},
+                                                  #ramp_kv{ts={{1,1,4},from}, item=key5, value=value5, md=[]}]
                     end)
      end,
      fun(_) ->
@@ -197,13 +202,19 @@ get_test_() ->
      [
       ?_assertEqual({reply, not_found, {}},
                     handle_call({get, key1}, from, {})),
-      ?_assertEqual({reply, {ok, value2}, {}},
+      ?_assertEqual({reply, {ok, #ramp_kv{ts={{1,1,1},from},
+                                          item=key2,
+                                          value=value2,
+                                          md=[]}}, {}},
                     handle_call({get, key2}, from, {})),
       ?_assertEqual({reply, not_found, {}},
                     handle_call({get, key3, {{1,1,2},from}}, from, {})),
       ?_assertEqual({reply, not_found, {}},
                     handle_call({get, key3, {{1,1,3},from}}, from, {})),
-      ?_assertEqual({reply, {ok, value4}, {}},
+      ?_assertEqual({reply, {ok, #ramp_kv{ts={{1,1,3},from},
+                                          item=key4,
+                                          value=value4,
+                                          md=[]}}, {}},
                     handle_call({get, key4, {{1,1,3},from}}, from, {})),
       ?_assertEqual({reply, multiple_items_call_doctor, {}},
                     handle_call({get, key5, {{1,1,4},from}}, from, {}))
