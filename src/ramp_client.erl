@@ -1,10 +1,16 @@
 -module(ramp_client).
 
--export([put_all/1,
-         get_all/1
+-export([put_all/2,
+         put_all/1,
+         get_all/1,
+         ts/0
         ]).
 
 -include("include/ramp.hrl").
+
+-type ts() :: {erlang:timestamp(), node()}.
+
+-export_type([ts/0]).
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
@@ -15,18 +21,26 @@
 %%%===================================================================
 -spec put_all([#kv{}]) -> ok.
 put_all(Data) ->
-    Ts = {now(), node()},
+    put_all(Data, ts()).
+
+-spec put_all([#kv{}], {erlang:timestamp(), node()}) -> ok.
+put_all(Data, Ts) ->
     Keys = [X#kv.item || X <- Data],
+    N = 3,
+    W = 2,
     %TODO: make it a parallel-for
-    lists:foreach(fun (#kv{item = Item, value = Value}) ->
-                          Md = lists:delete(Item, Keys),
-                          I = #ramp_kv{item = Item,
+    lists:foreach(fun (#kv{item = Key, value = Value}) ->
+                          Md = lists:delete(Key, Keys),
+                          I = #ramp_kv{item = Key,
                                        value = Value,
                                        ts = Ts,
                                        md = Md},
-                          ramp_storage:prepare(I)
+                          {ok, _Val} = ramp_op_fsm:sync_op(N, W, {prepare, I}, ?KEY(Key), ?TIMEOUT)
                   end, Data),
-    ramp_storage:commit(Ts).
+    %TODO: it would be really terrific if we could contact the nodes only once (perhaps with multiple indices simultaneously)
+    PrefList = lists:flatten([riak_core_apl:get_apl(
+                                riak_core_util:chash_key(?KEY(Key)), N, ramp) || Key <- Keys]),
+    riak_core_vnode_master:command(PrefList, {commit, Ts}, ramp_vnode_master).
 
 %%%procedure GET_ALL (I : set of items)
 %%% ret <- {}
@@ -34,13 +48,25 @@ put_all(Data) ->
 %%%    ret[i] <- GET (i, 0)
 -spec get_all([term()]) -> [term()].
 get_all(Keys) ->
+    N = 3,
+    W = 1, % We take the first response (they would get to the same value eventually)
     %TODO: make it parallel
-    Ret = lists:foldl(fun (Key, Acc) ->
-                            {ok, Item} = ramp_storage:get(Key),
-                            dict:append(Item#ramp_kv.item, Item, Acc)
-                        end, dict:new(), Keys),
+    {Ret,Failed} = lists:foldl(fun (Key, {Acc,FailedKeys}) ->
+                                       {ok, [RetVal]} = ramp_op_fsm:sync_op(N, W, {get, Key}, ?KEY(Key), ?TIMEOUT),
+                                       case RetVal of
+                                           {ok,#ramp_kv{} = Item} ->
+                                               {dict:append(Key, Item, Acc), FailedKeys};
+                                           SomeError ->
+                                               lager:log(info, self(), "Error: ~p, ~p", [Key, SomeError]),
+                                               {Acc, [Key | FailedKeys]}
+                                       end
+                               end, {dict:new(),[]}, Keys),
     Vlatest = find_latest_timestamps(Ret),
-    get_latest_versions(Ret, Vlatest, Keys).
+    get_latest_versions(Ret, Vlatest, Keys -- Failed).
+
+-spec ts() -> ts().
+ts() ->
+    {now(), node()}.
 
 %%%===================================================================
 %%% Private functions
@@ -72,6 +98,8 @@ find_latest_timestamps(Ret) ->
 %%% return ret
 -spec get_latest_versions(dict:dict(), dict:dict(), [term()]) -> [term()].
 get_latest_versions(Ret, Vlatest, Keys) ->
+    N = 3,
+    W = 1, % We take the first response (they would get to the same value eventually)
     %TODO: make it parallel
     lists:reverse(
       lists:foldl(
@@ -83,10 +111,10 @@ get_latest_versions(Ret, Vlatest, Keys) ->
                 [RTs] = dict:fetch(Key, Ret),
                 case VTs of
                     VTs when VTs > RTs#ramp_kv.ts ->
-                        {ok, I} = ramp_storage:get(Key, VTs),
-                        [I#ramp_kv.value | Acc];
+                        {ok, Item} = ramp_op_fsm:sync_op(N, W, {get, Key, VTs}, ?KEY(Key), ?TIMEOUT),
+                        [{Item#ramp_kv.item, Item#ramp_kv.value} | Acc];
                     VTs when VTs =< RTs#ramp_kv.ts ->
-                        [RTs#ramp_kv.value | Acc]
+                        [{RTs#ramp_kv.item, RTs#ramp_kv.value} | Acc]
                 end
         end, [], Keys)).
 
