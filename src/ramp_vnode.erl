@@ -44,11 +44,9 @@ handle_command({commit, Ts}, _From, State) ->
     {reply, ok, State};
 %    {reply, {ReqId, ok}, State};
 handle_command({ReqId, {get, Key}}, _From, State) ->
-    {ok, Item} = ramp_storage:get(Key),
-    {reply, {ReqId, {ok, Item}}, State};
+    {reply, {ReqId, ramp_storage:get(Key)}, State};
 handle_command({ReqId, {get, Key, Ts}}, _From, State) ->
-    {ok, Item} = ramp_storage:get(Key, Ts),
-    {reply, {ReqId, {ok, Item}}, State};
+    {reply, {ReqId, ramp_storage:get(Key, Ts)}, State};
 handle_command(Msg, _From, State) ->
     ?PRINT({unhandled_cmd, Msg}),
     {noreply, State}.
