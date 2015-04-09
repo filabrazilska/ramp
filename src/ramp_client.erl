@@ -9,8 +9,9 @@
 -include("include/ramp.hrl").
 
 -type ts() :: {erlang:timestamp(), node()}.
+-type key() :: term().
 
--export_type([ts/0]).
+-export_type([ts/0, key/0]).
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
@@ -46,7 +47,7 @@ put_all(Data, Ts) ->
 %%% ret <- {}
 %%% parallel-for i in I
 %%%    ret[i] <- GET (i, 0)
--spec get_all([term()]) -> [term()].
+-spec get_all([key()]) -> [{key(), term()}].
 get_all(Keys) ->
     N = 3,
     W = 1, % We take the first response (they would get to the same value eventually)
@@ -96,7 +97,7 @@ find_latest_timestamps(Ret) ->
 %%%         ret[i] <- GET(i, vlatest[i])
 %%%
 %%% return ret
--spec get_latest_versions(dict:dict(), dict:dict(), [term()]) -> [term()].
+-spec get_latest_versions(dict:dict(), dict:dict(), [term()]) -> [{key(),term()}].
 get_latest_versions(Ret, Vlatest, Keys) ->
     N = 3,
     W = 1, % We take the first response (they would get to the same value eventually)

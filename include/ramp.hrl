@@ -5,7 +5,7 @@
 -record(ramp_kv, {ts, item, value, md}).
 
 -define(PRINT(Var), io:format("DEBUG: ~p:~p - ~p~n~n ~p~n~n", [?MODULE, ?LINE, ??Var, Var])).
--define(KEY(Item), {<<"ramp">>, crypto:hash(md5, Item)}).
+-define(KEY(Item), {<<"ramp">>, crypto:hash(md5, term_to_binary(Item))}).
 -define(TIMEOUT, 5000).
 
 -endif.
